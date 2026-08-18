@@ -1,4 +1,8 @@
 import AppKit
+import Carbon.HIToolbox
+
+private let takeControlHotKeySignature: OSType = 0x4852_5345
+private let takeControlHotKeyIdentifier: UInt32 = 1
 
 @MainActor
 final class AppController: NSObject, NSMenuDelegate {
@@ -10,6 +14,8 @@ final class AppController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var updateTimer: Timer?
     private var previousFrameTime: TimeInterval?
+    private var takeControlHotKey: EventHotKeyRef?
+    private var hotKeyEventHandler: EventHandlerRef?
     private var selectedDisplayID: NSNumber?
     private var isHorseVisible = true
 
@@ -34,6 +40,7 @@ final class AppController: NSObject, NSMenuDelegate {
             self?.overlayWindow?.makeKey()
         }
         inputController.start()
+        registerTakeControlHotKey()
 
         NotificationCenter.default.addObserver(
             self,
@@ -48,11 +55,11 @@ final class AppController: NSObject, NSMenuDelegate {
             object: nil
         )
 
-        NSApp.activate(ignoringOtherApps: true)
-        overlayWindow?.makeKeyAndOrderFront(nil)
+        takeControl()
     }
 
     func stop() {
+        unregisterTakeControlHotKey()
         updateTimer?.invalidate()
         updateTimer = nil
         inputController.stop()
@@ -61,9 +68,7 @@ final class AppController: NSObject, NSMenuDelegate {
     }
 
     func menuDidClose(_ menu: NSMenu) {
-        guard isHorseVisible else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        overlayWindow?.makeKeyAndOrderFront(nil)
+        takeControl()
     }
 
     private func createOverlay(on screen: NSScreen) {
@@ -80,6 +85,16 @@ final class AppController: NSObject, NSMenuDelegate {
 
         let menu = NSMenu(title: "Horse")
         menu.delegate = self
+
+        let takeControlItem = menu.addItem(
+            withTitle: "Take Control",
+            action: #selector(takeControl),
+            keyEquivalent: "h"
+        )
+        takeControlItem.keyEquivalentModifierMask = [.control, .shift]
+        takeControlItem.target = self
+
+        menu.addItem(.separator())
 
         let visibilityItem = menu.addItem(
             withTitle: "Hide Horse",
@@ -126,7 +141,7 @@ final class AppController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         let controlsItem = NSMenuItem(
-            title: "WASD / arrows move · hold Control+Option for mouse",
+            title: "Control+Shift+H takes control · WASD / arrows move · hold Control+Option for mouse",
             action: nil,
             keyEquivalent: ""
         )
@@ -162,6 +177,12 @@ final class AppController: NSObject, NSMenuDelegate {
         }
 
         displayMenuItem?.submenu = displayMenu
+    }
+
+    @objc private func takeControl() {
+        guard isHorseVisible else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        overlayWindow?.makeKeyAndOrderFront(nil)
     }
 
     @objc private func toggleHorseVisibility() {
@@ -242,6 +263,90 @@ final class AppController: NSObject, NSMenuDelegate {
             updateTimer = nil
             previousFrameTime = nil
         }
+    }
+
+    private func registerTakeControlHotKey() {
+        guard takeControlHotKey == nil, hotKeyEventHandler == nil else { return }
+
+        var eventType = EventTypeSpec(
+            eventClass: OSType(kEventClassKeyboard),
+            eventKind: UInt32(kEventHotKeyPressed)
+        )
+        let handlerStatus = InstallEventHandler(
+            GetApplicationEventTarget(),
+            { _, event, userData in
+                guard let event, let userData else {
+                    return OSStatus(eventNotHandledErr)
+                }
+
+                var hotKeyID = EventHotKeyID()
+                let parameterStatus = GetEventParameter(
+                    event,
+                    EventParamName(kEventParamDirectObject),
+                    EventParamType(typeEventHotKeyID),
+                    nil,
+                    MemoryLayout<EventHotKeyID>.size,
+                    nil,
+                    &hotKeyID
+                )
+                guard
+                    parameterStatus == noErr,
+                    hotKeyID.signature == takeControlHotKeySignature,
+                    hotKeyID.id == takeControlHotKeyIdentifier
+                else {
+                    return OSStatus(eventNotHandledErr)
+                }
+
+                let controller = Unmanaged<AppController>
+                    .fromOpaque(userData)
+                    .takeUnretainedValue()
+                Task { @MainActor in
+                    controller.takeControl()
+                }
+                return noErr
+            },
+            1,
+            &eventType,
+            Unmanaged.passUnretained(self).toOpaque(),
+            &hotKeyEventHandler
+        )
+        guard handlerStatus == noErr else {
+            NSLog("Horse could not install its take-control shortcut handler: %d", handlerStatus)
+            return
+        }
+
+        let hotKeyID = EventHotKeyID(
+            signature: takeControlHotKeySignature,
+            id: takeControlHotKeyIdentifier
+        )
+        let hotKeyStatus = RegisterEventHotKey(
+            UInt32(kVK_ANSI_H),
+            UInt32(controlKey | shiftKey),
+            hotKeyID,
+            GetApplicationEventTarget(),
+            0,
+            &takeControlHotKey
+        )
+        guard hotKeyStatus == noErr else {
+            if let hotKeyEventHandler {
+                RemoveEventHandler(hotKeyEventHandler)
+            }
+            hotKeyEventHandler = nil
+            NSLog("Horse could not register Control+Shift+H: %d", hotKeyStatus)
+            return
+        }
+    }
+
+    private func unregisterTakeControlHotKey() {
+        if let takeControlHotKey {
+            UnregisterEventHotKey(takeControlHotKey)
+        }
+        takeControlHotKey = nil
+
+        if let hotKeyEventHandler {
+            RemoveEventHandler(hotKeyEventHandler)
+        }
+        hotKeyEventHandler = nil
     }
 
     @objc private func screenConfigurationChanged() {
