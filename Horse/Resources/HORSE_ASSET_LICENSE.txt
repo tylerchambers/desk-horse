@@ -1,0 +1,8 @@
+Farm Animals Pack by Quaternius
+https://quaternius.com/packs/farmanimal.html
+
+License: CC0 1.0 Universal Public Domain Dedication
+https://creativecommons.org/publicdomain/zero/1.0/
+
+The Horse.obj mesh and its two materials were converted to USD/USDZ for Horse.
+No attribution is required. Original author credit is retained here for provenance.
